@@ -1,0 +1,43 @@
+[package]
+name = "fehm-rs"
+version = "0.1.0"
+description = "Steady single-phase water flow in a discrete fracture network, based on FEHM"
+edition = "2024"
+license = "BSD-3-Clause"
+
+[lib]
+name = "fehm"
+
+[[bin]]
+name = "fehm"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+# The fehm binary: command line and log to stdout
+cli = ["dep:clap", "dep:tracing-subscriber"]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"], optional = true }
+# No rayon (threads) and no rand/npy: the library compiles for wasm32-unknown-unknown
+faer = { version = "0.24.4", default-features = false, features = ["std", "sparse-linalg"] }
+roxmltree = "0.21.1"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+toml = { version = "1.1", default-features = false, features = ["std", "parse", "serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+[lints.clippy]
+uninlined_format_args = "warn"
+needless_pass_by_value = "warn"
+explicit_iter_loop = "warn"
+redundant_else = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"
+cast_possible_wrap = "warn"

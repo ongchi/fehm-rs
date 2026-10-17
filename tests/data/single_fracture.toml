@@ -1,0 +1,11 @@
+# One vertical fracture (tests/data/single_fracture.vtu): flow from west to east, with gravity
+mesh = "single_fracture.vtu"
+temperature = 50.0
+
+[[boundary]]
+name = "west"
+pressure = 10.1
+
+[[boundary]]
+name = "east"
+pressure = 10.0

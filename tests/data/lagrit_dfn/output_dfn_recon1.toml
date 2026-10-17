@@ -1,0 +1,12 @@
+# DFN triangle mesh of the LaGriT test level01/recon1 (output_dfn_recon1.vtu,
+# made by scripts/avs_to_vtu.py): flow from the west part to the east part, with gravity
+mesh = "output_dfn_recon1.vtu"
+temperature = 25.0
+
+[[boundary]]
+name = "west"
+pressure = 1.0
+
+[[boundary]]
+name = "east"
+pressure = 0.5
