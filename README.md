@@ -51,8 +51,11 @@ An ASCII VTK UnstructuredGrid file (`.vtu`) with one `Piece`:
   - `permeability` (m², above 0); for example the cubic law, b²/12.
 - Point data arrays `boundary__<name>` (optional): a point with a value
   above 0 is on the boundary `<name>`. The input file gives the pressure of
-  each boundary which it uses; the other arrays are ignored. A point can be
-  on two boundaries only if they have the same pressure.
+  each boundary which it uses; the other arrays are ignored. A point on two
+  boundaries with different pressures keeps the pressure of the first of them
+  in the input file (a warning gives the number of such points); a boundary
+  whose points are all in earlier boundaries with another pressure is an
+  error.
 
 Each group of connected fractures must have a point on a boundary; if not,
 its pressure has no unique value, and the run stops with an error which

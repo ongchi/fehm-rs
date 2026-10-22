@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use tracing::warn;
+
 use crate::FehmError;
 use crate::eos;
 use crate::io::vtu::{BOUNDARY_ARRAY_PREFIX, parse_mesh};
@@ -171,7 +173,7 @@ pub fn build_input_from_text(input_text: &str, mesh_text: &str) -> Result<Input,
         });
     }
 
-    check_boundary_overlaps(&boundaries, mesh.points.len())?;
+    resolve_boundary_overlaps(&mut boundaries, mesh.points.len())?;
 
     let solver_section = input_file.solver.unwrap_or(SolverSection {
         tolerance: None,
@@ -203,25 +205,53 @@ pub fn build_input_from_text(input_text: &str, mesh_text: &str) -> Result<Input,
     })
 }
 
-/// A node can be in two boundaries only if they have the same pressure
-fn check_boundary_overlaps(
-    boundaries: &[PressureBoundary],
+/// A node in two boundaries with different pressures keeps the pressure of
+/// the first boundary (in the order of the input file): it is removed from
+/// the later boundary, with a warning for each pair of boundaries. A node in
+/// two boundaries with the same pressure stays in both. A boundary which
+/// then has no node is an error.
+fn resolve_boundary_overlaps(
+    boundaries: &mut [PressureBoundary],
     point_count: usize,
 ) -> Result<(), FehmError> {
     let mut boundary_of_node: Vec<Option<usize>> = vec![None; point_count];
 
-    for (index, boundary) in boundaries.iter().enumerate() {
-        for &node in &boundary.nodes {
-            match boundary_of_node[node] {
-                Some(first) if boundaries[first].pressure != boundary.pressure => {
-                    return Err(FehmError::InvalidInput(format!(
-                        "point {node} is in the boundaries \"{}\" and \"{}\", which have different pressures",
-                        boundaries[first].name, boundary.name
-                    )));
+    for index in 0..boundaries.len() {
+        let pressure = boundaries[index].pressure;
+        let mut removed_by_first: Vec<(usize, usize)> = Vec::new();
+
+        let mut nodes = std::mem::take(&mut boundaries[index].nodes);
+        nodes.retain(|&node| match boundary_of_node[node] {
+            Some(first) if boundaries[first].pressure != pressure => {
+                match removed_by_first
+                    .iter_mut()
+                    .find(|(boundary, _)| *boundary == first)
+                {
+                    Some((_, count)) => *count += 1,
+                    None => removed_by_first.push((first, 1)),
                 }
-                Some(_) => {}
-                None => boundary_of_node[node] = Some(index),
+                false
             }
+            Some(_) => true,
+            None => {
+                boundary_of_node[node] = Some(index);
+                true
+            }
+        });
+        boundaries[index].nodes = nodes;
+
+        for (first, count) in removed_by_first {
+            warn!(
+                "{count} points are in the boundaries \"{}\" and \"{}\", which have different pressures; they keep the pressure of \"{}\" (the first in the input file)",
+                boundaries[first].name, boundaries[index].name, boundaries[first].name
+            );
+        }
+
+        if boundaries[index].nodes.is_empty() {
+            return Err(FehmError::InvalidInput(format!(
+                "boundary \"{}\": each of its points is in an earlier boundary with another pressure, thus it has no effect",
+                boundaries[index].name
+            )));
         }
     }
 
@@ -329,10 +359,22 @@ pressure = 10.0
     }
 
     #[test]
-    fn node_in_two_boundaries_with_different_pressures_is_an_error() {
+    fn node_in_two_boundaries_with_different_pressures_keeps_the_first_boundary() {
+        let input_text = VALID_INPUT
+            .replace("\"left\"", "\"first\"")
+            .replace("\"right\"", "\"left\"")
+            .replace("\"first\"", "\"corner\"");
+        let input = build_input_from_text(&input_text, MESH).unwrap();
+
+        assert_eq!(input.boundaries[0].nodes, vec![0]);
+        assert_eq!(input.boundaries[1].nodes, vec![3]);
+    }
+
+    #[test]
+    fn boundary_with_only_points_of_an_earlier_boundary_is_an_error() {
         let error = error_of(&VALID_INPUT.replace("\"right\"", "\"corner\""));
         assert!(
-            error.contains("point 0 is in the boundaries \"left\" and \"corner\""),
+            error.contains("boundary \"corner\": each of its points is in an earlier boundary"),
             "{error}"
         );
     }
