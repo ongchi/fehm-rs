@@ -18,6 +18,9 @@ pub struct Connection {
     /// negative sign)
     pub area_coefficient: f64,
     /// Sum over the triangles of the edge of ½·cot(angle opposite the edge)
+    /// · aperture (m): the aperture-corrected `.stor` coefficient of dfnWorks
+    pub aperture_coefficient: f64,
+    /// Sum over the triangles of the edge of ½·cot(angle opposite the edge)
     /// · aperture · permeability (m³). Mass flux = transmissibility · ρ/μ · Δpotential.
     pub transmissibility: f64,
 }
@@ -58,7 +61,8 @@ impl ControlVolumes {
 pub fn calculate_control_volumes(mesh: &Mesh) -> Result<ControlVolumes, FehmError> {
     let mut areas = vec![0.0; mesh.points.len()];
     let mut volumes = vec![0.0; mesh.points.len()];
-    // One entry for each edge of each triangle: (nodes, area coefficient, transmissibility)
+    // One entry for each edge of each triangle:
+    // (nodes, area coefficient, aperture coefficient, transmissibility)
     let mut edges = Vec::with_capacity(3 * mesh.triangles.len());
 
     for (cell, triangle) in mesh.triangles.iter().enumerate() {
@@ -73,7 +77,12 @@ pub fn calculate_control_volumes(mesh: &Mesh) -> Result<ControlVolumes, FehmErro
         for (k, i, j) in [(0, 1, 2), (1, 2, 0), (2, 0, 1)] {
             let edge_coefficient = 0.5 * cotangents[k];
             let nodes = [triangle[i].min(triangle[j]), triangle[i].max(triangle[j])];
-            edges.push((nodes, edge_coefficient, edge_coefficient * conductance));
+            edges.push((
+                nodes,
+                edge_coefficient,
+                edge_coefficient * thickness,
+                edge_coefficient * conductance,
+            ));
 
             // Voronoi area of the edge (i, j): ¼·|ij|² · ½·cot k, half to i and half to j
             let half_area = 0.125 * squared_distance(vertices[i], vertices[j]) * cotangents[k];
@@ -84,18 +93,20 @@ pub fn calculate_control_volumes(mesh: &Mesh) -> Result<ControlVolumes, FehmErro
         }
     }
 
-    edges.sort_by_key(|&(nodes, _, _)| nodes);
+    edges.sort_by_key(|&(nodes, _, _, _)| nodes);
 
     let mut connections: Vec<Connection> = Vec::new();
-    for (nodes, area_coefficient, transmissibility) in edges {
+    for (nodes, area_coefficient, aperture_coefficient, transmissibility) in edges {
         match connections.last_mut() {
             Some(connection) if connection.nodes == nodes => {
                 connection.area_coefficient += area_coefficient;
+                connection.aperture_coefficient += aperture_coefficient;
                 connection.transmissibility += transmissibility;
             }
             _ => connections.push(Connection {
                 nodes,
                 area_coefficient,
+                aperture_coefficient,
                 transmissibility,
             }),
         }
@@ -207,7 +218,29 @@ mod tests {
             assert_eq!(*nodes, expected_nodes);
             assert!((coefficient - expected_coefficient).abs() < 1e-15);
         }
+        assert!((control_volumes.connections[0].aperture_coefficient - 1.0).abs() < 1e-15);
         assert!((control_volumes.connections[0].transmissibility - 3.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn aperture_coefficient_sums_the_aperture_of_each_triangle() {
+        // Two triangles on the edge (0, 1); the angle opposite it has cot = 3/4 in each
+        let mut rhombus = mesh(
+            vec![
+                [0.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [1.0, 2.0, 0.0],
+                [1.0, -2.0, 0.0],
+            ],
+            vec![[0, 1, 2], [0, 3, 1]],
+        );
+        rhombus.apertures = vec![1.0, 2.0];
+        let control_volumes = calculate_control_volumes(&rhombus).unwrap();
+
+        let shared_edge = &control_volumes.connections[0];
+        assert_eq!(shared_edge.nodes, [0, 1]);
+        // 0.375 · 1 + 0.375 · 2
+        assert!((shared_edge.aperture_coefficient - 1.125).abs() < 1e-15);
     }
 
     #[test]
