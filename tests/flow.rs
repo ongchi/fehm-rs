@@ -1,7 +1,7 @@
 //! Flow solutions on the meshes of `scripts/make_test_meshes.py`.
 
 use fehm::flow::GRAVITY;
-use fehm::{Input, Solution, build_input_from_text, eos, solve};
+use fehm::{FehmError, Input, Solution, build_input_from_text, eos, solve};
 
 const SINGLE_FRACTURE: &str = include_str!("data/single_fracture.vtu");
 const CROSSING_FRACTURES: &str = include_str!("data/crossing_fractures.vtu");
@@ -166,9 +166,9 @@ fn crossing_fractures_exchange_flow_on_the_intersection() {
 #[test]
 fn fracture_without_boundary_is_an_error() {
     let input = input(ISOLATED_FRACTURE, true, &[("west", 10.1), ("east", 10.0)]);
-    let error = solve(&input).unwrap_err().to_string();
+    let error = solve(&input).unwrap_err();
     assert!(
-        error.starts_with("The fractures 3 have no connection to a boundary"),
+        matches!(&error, FehmError::NoBoundary { fracture_ids } if fracture_ids == &[3]),
         "{error}"
     );
 }

@@ -394,11 +394,5 @@ fn check_every_cluster_has_a_boundary(
 
     fracture_ids.sort_unstable();
     fracture_ids.dedup();
-    Err(FehmError::NoBoundary(
-        fracture_ids
-            .iter()
-            .map(i64::to_string)
-            .collect::<Vec<_>>()
-            .join(", "),
-    ))
+    Err(FehmError::NoBoundary { fracture_ids })
 }

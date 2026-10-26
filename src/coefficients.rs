@@ -67,9 +67,7 @@ pub fn calculate_control_volumes(mesh: &Mesh) -> Result<ControlVolumes, FehmErro
 
     for (cell, triangle) in mesh.triangles.iter().enumerate() {
         let vertices = triangle.map(|point| mesh.points[point]);
-        let cotangents = cotangents(&vertices).ok_or_else(|| {
-            FehmError::InvalidMesh(format!("cell {cell}: the triangle has no area"))
-        })?;
+        let cotangents = cotangents(&vertices).ok_or(FehmError::DegenerateTriangle { cell })?;
         let thickness = mesh.apertures[cell];
         let conductance = thickness * mesh.permeabilities[cell];
 
@@ -288,9 +286,8 @@ mod tests {
         ))
         .unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("cell 0: the triangle has no area")
+            matches!(error, FehmError::DegenerateTriangle { cell: 0 }),
+            "{error}"
         );
     }
 }

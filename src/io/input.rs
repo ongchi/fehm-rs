@@ -6,7 +6,7 @@ use tracing::warn;
 
 use crate::FehmError;
 use crate::eos;
-use crate::io::vtu::{BOUNDARY_ARRAY_PREFIX, parse_mesh};
+use crate::io::vtu::parse_mesh;
 use crate::mesh::Mesh;
 
 /// All data of one run
@@ -103,28 +103,21 @@ pub fn read_mesh_file_name(input_text: &str) -> Result<PathBuf, FehmError> {
 }
 
 fn parse_input_file(input_text: &str) -> Result<InputFile, FehmError> {
-    toml::from_str(input_text).map_err(|e| FehmError::InvalidInput(e.to_string()))
+    toml::from_str(input_text).map_err(|e| FehmError::InvalidToml(e.to_string()))
 }
 
 /// Builds the input from the text of the input file and of the mesh file
 pub fn build_input_from_text(input_text: &str, mesh_text: &str) -> Result<Input, FehmError> {
     let input_file = parse_input_file(input_text)?;
     let mesh = parse_mesh(mesh_text).map_err(FehmError::InvalidMesh)?;
-    let invalid = |message: String| Err(FehmError::InvalidInput(message));
 
     if !(eos::MIN_TEMPERATURE..=eos::MAX_TEMPERATURE).contains(&input_file.temperature) {
-        return invalid(format!(
-            "temperature = {} °C is outside the range of the water properties of FEHM ({} to {} °C)",
-            input_file.temperature,
-            eos::MIN_TEMPERATURE,
-            eos::MAX_TEMPERATURE
-        ));
+        return Err(FehmError::TemperatureRange {
+            temperature: input_file.temperature,
+        });
     }
     if input_file.boundary.is_empty() {
-        return invalid(
-            "there is no [[boundary]]; at least one boundary with a fixed pressure is necessary"
-                .to_string(),
-        );
+        return Err(FehmError::NoBoundaryDefined);
     }
 
     let mut boundaries: Vec<PressureBoundary> = Vec::new();
@@ -134,19 +127,15 @@ pub fn build_input_from_text(input_text: &str, mesh_text: &str) -> Result<Input,
             .iter()
             .any(|boundary| boundary.name == section.name)
         {
-            return invalid(format!(
-                "two [[boundary]] tables have the name \"{}\"",
-                section.name
-            ));
+            return Err(FehmError::DuplicateBoundary {
+                boundary: section.name,
+            });
         }
         if !(eos::MIN_PRESSURE..=eos::MAX_PRESSURE).contains(&section.pressure) {
-            return invalid(format!(
-                "boundary \"{}\": pressure = {} MPa is outside the range of the water properties of FEHM ({} to {} MPa)",
-                section.name,
-                section.pressure,
-                eos::MIN_PRESSURE,
-                eos::MAX_PRESSURE
-            ));
+            return Err(FehmError::PressureRange {
+                boundary: section.name,
+                pressure: section.pressure,
+            });
         }
 
         let Some(boundary_nodes) = mesh
@@ -154,16 +143,14 @@ pub fn build_input_from_text(input_text: &str, mesh_text: &str) -> Result<Input,
             .iter()
             .find(|boundary_nodes| boundary_nodes.name == section.name)
         else {
-            return invalid(format!(
-                "boundary \"{}\": the mesh has no point data array {BOUNDARY_ARRAY_PREFIX}{}",
-                section.name, section.name
-            ));
+            return Err(FehmError::UnknownBoundary {
+                boundary: section.name,
+            });
         };
         if boundary_nodes.nodes.is_empty() {
-            return invalid(format!(
-                "boundary \"{}\": the array {BOUNDARY_ARRAY_PREFIX}{} has no point with a value above 0",
-                section.name, section.name
-            ));
+            return Err(FehmError::EmptyBoundary {
+                boundary: section.name,
+            });
         }
 
         boundaries.push(PressureBoundary {
@@ -187,13 +174,12 @@ pub fn build_input_from_text(input_text: &str, mesh_text: &str) -> Result<Input,
     };
 
     if !(solver.tolerance > 0.0 && solver.tolerance < 1.0) {
-        return invalid(format!(
-            "solver.tolerance = {} must be above 0 and below 1",
-            solver.tolerance
-        ));
+        return Err(FehmError::SolverTolerance {
+            tolerance: solver.tolerance,
+        });
     }
     if solver.max_iterations == 0 {
-        return invalid("solver.max_iterations must be 1 or more".to_string());
+        return Err(FehmError::SolverMaxIterations);
     }
 
     Ok(Input {
@@ -248,10 +234,9 @@ fn resolve_boundary_overlaps(
         }
 
         if boundaries[index].nodes.is_empty() {
-            return Err(FehmError::InvalidInput(format!(
-                "boundary \"{}\": each of its points is in an earlier boundary with another pressure, thus it has no effect",
-                boundaries[index].name
-            )));
+            return Err(FehmError::BoundaryWithoutEffect {
+                boundary: boundaries[index].name.clone(),
+            });
         }
     }
 
@@ -305,9 +290,11 @@ pressure = 10.0
 "#;
 
     fn error_of(input_text: &str) -> String {
-        build_input_from_text(input_text, MESH)
-            .unwrap_err()
-            .to_string()
+        input_error(input_text).to_string()
+    }
+
+    fn input_error(input_text: &str) -> FehmError {
+        build_input_from_text(input_text, MESH).unwrap_err()
     }
 
     #[test]
@@ -336,26 +323,26 @@ pressure = 10.0
 
     #[test]
     fn unknown_boundary_name_is_an_error() {
-        let error = error_of(&VALID_INPUT.replace("\"right\"", "\"top\""));
+        let error = input_error(&VALID_INPUT.replace("\"right\"", "\"top\""));
         assert!(
-            error.contains("no point data array boundary__top"),
+            matches!(&error, FehmError::UnknownBoundary { boundary } if boundary == "top"),
             "{error}"
         );
     }
 
     #[test]
     fn empty_boundary_is_an_error() {
-        let error = error_of(&VALID_INPUT.replace("\"right\"", "\"none\""));
+        let error = input_error(&VALID_INPUT.replace("\"right\"", "\"none\""));
         assert!(
-            error.contains("has no point with a value above 0"),
+            matches!(&error, FehmError::EmptyBoundary { boundary } if boundary == "none"),
             "{error}"
         );
     }
 
     #[test]
     fn no_boundary_is_an_error() {
-        let error = error_of("mesh = \"mesh.vtu\"\ntemperature = 50.0\n");
-        assert!(error.contains("there is no [[boundary]]"), "{error}");
+        let error = input_error("mesh = \"mesh.vtu\"\ntemperature = 50.0\n");
+        assert!(matches!(error, FehmError::NoBoundaryDefined), "{error}");
     }
 
     #[test]
@@ -372,9 +359,9 @@ pressure = 10.0
 
     #[test]
     fn boundary_with_only_points_of_an_earlier_boundary_is_an_error() {
-        let error = error_of(&VALID_INPUT.replace("\"right\"", "\"corner\""));
+        let error = input_error(&VALID_INPUT.replace("\"right\"", "\"corner\""));
         assert!(
-            error.contains("boundary \"corner\": each of its points is in an earlier boundary"),
+            matches!(&error, FehmError::BoundaryWithoutEffect { boundary } if boundary == "corner"),
             "{error}"
         );
     }
@@ -389,7 +376,52 @@ pressure = 10.0
 
     #[test]
     fn temperature_outside_the_eos_range_is_an_error() {
+        let error = input_error(&VALID_INPUT.replace("50.0", "400.0"));
+        assert!(
+            matches!(error, FehmError::TemperatureRange { temperature } if temperature == 400.0),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn temperature_error_names_the_range() {
         let error = error_of(&VALID_INPUT.replace("50.0", "400.0"));
-        assert!(error.contains("temperature = 400 °C is outside"), "{error}");
+        assert!(
+            error.contains("temperature = 400 °C is outside the range of the water properties of FEHM (15 to 360 °C)"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn two_boundaries_with_one_name_are_an_error() {
+        let error = input_error(&VALID_INPUT.replace("\"right\"", "\"left\""));
+        assert!(
+            matches!(&error, FehmError::DuplicateBoundary { boundary } if boundary == "left"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn pressure_outside_the_eos_range_is_an_error() {
+        let error = input_error(&VALID_INPUT.replace("10.1", "200.0"));
+        assert!(
+            matches!(&error, FehmError::PressureRange { boundary, pressure } if boundary == "left" && *pressure == 200.0),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn solver_tolerance_of_one_is_an_error() {
+        let error = input_error(&format!("{VALID_INPUT}\n[solver]\ntolerance = 1.0\n"));
+        assert!(
+            matches!(error, FehmError::SolverTolerance { tolerance } if tolerance == 1.0),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn zero_solver_iterations_are_an_error() {
+        let error = input_error(&format!("{VALID_INPUT}\n[solver]\nmax_iterations = 0\n"));
+        assert!(matches!(error, FehmError::SolverMaxIterations), "{error}");
     }
 }
