@@ -110,7 +110,16 @@ fn parse_input_file(input_text: &str) -> Result<InputFile, FehmError> {
 pub fn build_input_from_text(input_text: &str, mesh_text: &str) -> Result<Input, FehmError> {
     let input_file = parse_input_file(input_text)?;
     let mesh = parse_mesh(mesh_text).map_err(FehmError::InvalidMesh)?;
+    build_input(input_file, mesh)
+}
 
+/// Builds the input from the text of the input file and a mesh in memory.
+/// The `mesh` key of the input file has no effect.
+pub fn build_input_from_mesh(input_text: &str, mesh: Mesh) -> Result<Input, FehmError> {
+    build_input(parse_input_file(input_text)?, mesh)
+}
+
+fn build_input(input_file: InputFile, mesh: Mesh) -> Result<Input, FehmError> {
     if !(eos::MIN_TEMPERATURE..=eos::MAX_TEMPERATURE).contains(&input_file.temperature) {
         return Err(FehmError::TemperatureRange {
             temperature: input_file.temperature,
@@ -295,6 +304,22 @@ pressure = 10.0
 
     fn input_error(input_text: &str) -> FehmError {
         build_input_from_text(input_text, MESH).unwrap_err()
+    }
+
+    #[test]
+    fn a_mesh_in_memory_gives_the_input_of_the_mesh_text() {
+        let toml = r#"
+            mesh = "ignored.vtu"
+            temperature = 20.0
+            [[boundary]]
+            name = "left"
+            pressure = 10.0
+        "#;
+        let mesh = parse_mesh(MESH).expect("valid mesh");
+        let input = build_input_from_mesh(toml, mesh).expect("valid input");
+        let from_text = build_input_from_text(toml, MESH).expect("valid input");
+        assert_eq!(input.mesh.points, from_text.mesh.points);
+        assert_eq!(input.boundaries[0].nodes, from_text.boundaries[0].nodes);
     }
 
     #[test]
