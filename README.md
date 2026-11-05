@@ -2,9 +2,10 @@
 
 Steady single-phase water flow in a discrete fracture network (DFN), in Rust.
 It replaces the FEHM step of the [dfnWorks](https://github.com/lanl/dfnWorks)
-work flow for networks from [dfngen-rs](../dfngen-rs). The equations and the
-water properties come from [FEHM](https://github.com/lanl/FEHM) (in
-`../FEHM`); only the isothermal liquid flow of FEHM is ported.
+work flow for networks from [dfngen-rs](https://github.com/ongchi/dfngen-rs).
+The equations and the water properties come from
+[FEHM](https://github.com/lanl/FEHM); only the isothermal liquid flow of
+FEHM is ported.
 
 ## Usage
 
@@ -139,7 +140,8 @@ let solution = fehm::solve_control_volumes(&fehm::FlowProblem {
 
 `tests/fehm_reference.rs` compares the pressures with those of the Fortran
 FEHM V3.6.3 for three cases (largest difference below 1e-8 of the pressure
-range). To repeat the FEHM runs, build FEHM from `../FEHM/src` and run
+range). To repeat the FEHM runs, build FEHM from the `src` folder of a
+[FEHM](https://github.com/lanl/FEHM) clone and run
 
 ```bash
 scripts/compare_with_fehm.sh tests/data/crossing_fractures.toml <work_folder> <path to xfehm>
