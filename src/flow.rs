@@ -16,7 +16,7 @@ use tracing::{debug, info, warn};
 use crate::FehmError;
 use crate::coefficients::{ControlVolumes, calculate_control_volumes};
 use crate::eos;
-use crate::io::input::Input;
+use crate::io::input::{Input, SolverOptions};
 
 /// Gravity (m/s²), as `ctrl` in FEHM (`inctrl.f`)
 pub const GRAVITY: f64 = 9.81;
@@ -36,6 +36,34 @@ pub struct Solution {
     /// negative for an out-flow. A node in two boundaries counts for the
     /// first one.
     pub boundary_flows: Vec<f64>,
+    pub newton_iterations: usize,
+}
+
+/// A steady flow problem on control volumes, of any mesh type
+#[derive(Clone, Copy, Debug)]
+pub struct FlowProblem<'a> {
+    pub control_volumes: &'a ControlVolumes,
+    /// For each node: elevation z (m)
+    pub elevations: &'a [f64],
+    /// For each node: its fixed pressure (MPa); `None` for an unknown pressure
+    pub fixed_pressures: &'a [Option<f64>],
+    /// Start value of the unknown pressures for the Newton iterations (MPa)
+    pub initial_pressure: f64,
+    /// Fluid temperature (°C)
+    pub temperature: f64,
+    /// True: gravity in the -z direction
+    pub has_gravity: bool,
+    pub solver: &'a SolverOptions,
+}
+
+/// Result of `solve_control_volumes`
+#[derive(Clone, Debug)]
+pub struct NodeSolution {
+    /// For each node (MPa)
+    pub pressures: Vec<f64>,
+    /// For each connection of the control volumes: mass flux from
+    /// `nodes[0]` to `nodes[1]` (kg/s)
+    pub mass_fluxes: Vec<f64>,
     pub newton_iterations: usize,
 }
 
@@ -84,13 +112,59 @@ struct ConnectionFlux {
     derivative_second: f64,
 }
 
-/// Solves the steady flow equations with Newton iterations.
+/// Solves the steady flow equations on the triangle mesh of the input.
 pub fn solve(input: &Input) -> Result<Solution, FehmError> {
     let control_volumes = calculate_control_volumes(&input.mesh)?;
     log_negative_coefficients(&control_volumes);
 
+    let elevations: Vec<f64> = input.mesh.points.iter().map(|point| point[2]).collect();
     let fixed_pressures = fixed_pressures(input);
-    check_every_cluster_has_a_boundary(input, &control_volumes, &fixed_pressures)?;
+    let mean_boundary_pressure = input
+        .boundaries
+        .iter()
+        .map(|boundary| boundary.pressure)
+        .sum::<f64>()
+        / input.boundaries.len() as f64;
+    let problem = FlowProblem {
+        control_volumes: &control_volumes,
+        elevations: &elevations,
+        fixed_pressures: &fixed_pressures,
+        initial_pressure: mean_boundary_pressure,
+        temperature: input.temperature,
+        has_gravity: input.has_gravity,
+        solver: &input.solver,
+    };
+    let node_solution = solve_control_volumes(&problem).map_err(|error| match error {
+        FehmError::NoBoundaryNodes { nodes } => FehmError::NoBoundary {
+            fracture_ids: fracture_ids_of_nodes(input, &nodes),
+        },
+        other => other,
+    })?;
+
+    let boundary_flows = calculate_boundary_flows(
+        input,
+        &control_volumes,
+        &node_solution.mass_fluxes,
+        input.mesh.points.len(),
+    );
+    Ok(Solution {
+        control_volumes,
+        pressures: node_solution.pressures,
+        mass_fluxes: node_solution.mass_fluxes,
+        boundary_flows,
+        newton_iterations: node_solution.newton_iterations,
+    })
+}
+
+/// Solves the steady flow equations of the problem with Newton iterations.
+pub fn solve_control_volumes(problem: &FlowProblem) -> Result<NodeSolution, FehmError> {
+    check_problem(problem)?;
+    let control_volumes = problem.control_volumes;
+    let fixed_pressures = problem.fixed_pressures;
+    let nodes = nodes_without_boundary(control_volumes, fixed_pressures);
+    if !nodes.is_empty() {
+        return Err(FehmError::NoBoundaryNodes { nodes });
+    }
 
     // Number of each node in the unknowns; `None` for a node with a fixed pressure
     let mut unknown_count = 0;
@@ -104,23 +178,17 @@ pub fn solve(input: &Input) -> Result<Solution, FehmError> {
         })
         .collect();
 
-    let mean_boundary_pressure = input
-        .boundaries
-        .iter()
-        .map(|boundary| boundary.pressure)
-        .sum::<f64>()
-        / input.boundaries.len() as f64;
     let mut pressures: Vec<f64> = fixed_pressures
         .iter()
-        .map(|fixed| fixed.unwrap_or(mean_boundary_pressure))
+        .map(|fixed| fixed.unwrap_or(problem.initial_pressure))
         .collect();
-    let gravity = if input.has_gravity { GRAVITY } else { 0.0 };
+    let gravity = if problem.has_gravity { GRAVITY } else { 0.0 };
     let largest_pressure = pressures.iter().fold(0.0, |max: f64, p| max.max(p.abs()));
     // Largest pressure change of the last Newton iteration (MPa)
     let mut largest_change = f64::INFINITY;
 
-    for iteration in 0..=input.solver.max_iterations {
-        let properties = NodeProperties::new(&pressures, input.temperature);
+    for iteration in 0..=problem.solver.max_iterations {
+        let properties = NodeProperties::new(&pressures, problem.temperature);
         let mut residuals = vec![0.0; unknown_count];
         // Sum of the flux scales of the connections of each unknown node: the scale of its residual
         let mut flux_scales = vec![0.0; unknown_count];
@@ -133,7 +201,7 @@ pub fn solve(input: &Input) -> Result<Solution, FehmError> {
                 [first, second],
                 &pressures,
                 &properties,
-                input.mesh.points[first][2] - input.mesh.points[second][2],
+                problem.elevations[first] - problem.elevations[second],
                 gravity,
             );
 
@@ -163,25 +231,18 @@ pub fn solve(input: &Input) -> Result<Solution, FehmError> {
 
         // A pressure change at the rounding level of the pressures: no further iteration can decrease the residual
         let is_change_at_rounding_level = largest_change <= 4.0 * f64::EPSILON * largest_pressure;
-        if largest_residual <= input.solver.tolerance * largest_scale || is_change_at_rounding_level
+        if largest_residual <= problem.solver.tolerance * largest_scale
+            || is_change_at_rounding_level
         {
             info!("Newton iterations: {iteration}");
-            let mass_fluxes = calculate_mass_fluxes(input, &control_volumes, &pressures, gravity);
-            let boundary_flows = calculate_boundary_flows(
-                input,
-                &control_volumes,
-                &mass_fluxes,
-                unknown_of_node.len(),
-            );
-            return Ok(Solution {
-                control_volumes,
+            let mass_fluxes = calculate_mass_fluxes(problem, &pressures, gravity);
+            return Ok(NodeSolution {
                 pressures,
                 mass_fluxes,
-                boundary_flows,
                 newton_iterations: iteration,
             });
         }
-        if iteration == input.solver.max_iterations {
+        if iteration == problem.solver.max_iterations {
             break;
         }
 
@@ -196,7 +257,30 @@ pub fn solve(input: &Input) -> Result<Solution, FehmError> {
             .fold(0.0, |max: f64, c| max.max(c.abs()));
     }
 
-    Err(FehmError::NoConvergence(input.solver.max_iterations))
+    Err(FehmError::NoConvergence(problem.solver.max_iterations))
+}
+
+/// Checks that the node arrays of the problem fit its control volumes, and the temperature range.
+fn check_problem(problem: &FlowProblem) -> Result<(), FehmError> {
+    let node_count = problem.control_volumes.volumes.len();
+    for (array, length) in [
+        ("elevations", problem.elevations.len()),
+        ("fixed_pressures", problem.fixed_pressures.len()),
+    ] {
+        if length != node_count {
+            return Err(FehmError::NodeArrayLength {
+                array,
+                length,
+                node_count,
+            });
+        }
+    }
+    if !(eos::MIN_TEMPERATURE..=eos::MAX_TEMPERATURE).contains(&problem.temperature) {
+        return Err(FehmError::TemperatureRange {
+            temperature: problem.temperature,
+        });
+    }
+    Ok(())
 }
 
 /// For each node: its fixed pressure, if it is in a boundary
@@ -255,15 +339,11 @@ fn calculate_connection_flux(
 }
 
 /// Mass flux of each connection (kg/s)
-fn calculate_mass_fluxes(
-    input: &Input,
-    control_volumes: &ControlVolumes,
-    pressures: &[f64],
-    gravity: f64,
-) -> Vec<f64> {
-    let properties = NodeProperties::new(pressures, input.temperature);
+fn calculate_mass_fluxes(problem: &FlowProblem, pressures: &[f64], gravity: f64) -> Vec<f64> {
+    let properties = NodeProperties::new(pressures, problem.temperature);
 
-    control_volumes
+    problem
+        .control_volumes
         .connections
         .iter()
         .map(|connection| {
@@ -273,7 +353,7 @@ fn calculate_mass_fluxes(
                 connection.nodes,
                 pressures,
                 &properties,
-                input.mesh.points[first][2] - input.mesh.points[second][2],
+                problem.elevations[first] - problem.elevations[second],
                 gravity,
             )
             .flux
@@ -345,15 +425,15 @@ fn log_negative_coefficients(control_volumes: &ControlVolumes) {
     }
 }
 
-/// Each group of connected nodes must have a node with a fixed pressure:
+/// The nodes in the groups of connected nodes with no fixed pressure, in
+/// increasing order. Each group must have a node with a fixed pressure:
 /// else its pressure has no unique value.
-fn check_every_cluster_has_a_boundary(
-    input: &Input,
+fn nodes_without_boundary(
     control_volumes: &ControlVolumes,
     fixed_pressures: &[Option<f64>],
-) -> Result<(), FehmError> {
-    let point_count = input.mesh.points.len();
-    let mut parents: Vec<usize> = (0..point_count).collect();
+) -> Vec<usize> {
+    let node_count = fixed_pressures.len();
+    let mut parents: Vec<usize> = (0..node_count).collect();
 
     fn find_root(parents: &mut [usize], mut node: usize) -> usize {
         while parents[node] != node {
@@ -372,7 +452,7 @@ fn check_every_cluster_has_a_boundary(
         parents[first.max(second)] = first.min(second);
     }
 
-    let mut has_boundary = vec![false; point_count];
+    let mut has_boundary = vec![false; node_count];
     for (node, fixed) in fixed_pressures.iter().enumerate() {
         if fixed.is_some() {
             let root = find_root(&mut parents, node);
@@ -380,19 +460,27 @@ fn check_every_cluster_has_a_boundary(
         }
     }
 
-    let mut fracture_ids: Vec<i64> = Vec::new();
-    for (cell, triangle) in input.mesh.triangles.iter().enumerate() {
-        let root = find_root(&mut parents, triangle[0]);
-        if !has_boundary[root] {
-            fracture_ids.push(input.mesh.fracture_ids[cell]);
-        }
+    (0..node_count)
+        .filter(|&node| !has_boundary[find_root(&mut parents, node)])
+        .collect()
+}
+
+/// The fractures of the triangles of the nodes, in increasing order
+fn fracture_ids_of_nodes(input: &Input, nodes: &[usize]) -> Vec<i64> {
+    let mut is_listed = vec![false; input.mesh.points.len()];
+    for &node in nodes {
+        is_listed[node] = true;
     }
 
-    if fracture_ids.is_empty() {
-        return Ok(());
-    }
-
+    let mut fracture_ids: Vec<i64> = input
+        .mesh
+        .triangles
+        .iter()
+        .zip(&input.mesh.fracture_ids)
+        .filter(|(triangle, _)| is_listed[triangle[0]])
+        .map(|(_, &fracture_id)| fracture_id)
+        .collect();
     fracture_ids.sort_unstable();
     fracture_ids.dedup();
-    Err(FehmError::NoBoundary { fracture_ids })
+    fracture_ids
 }

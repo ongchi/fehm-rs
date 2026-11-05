@@ -110,6 +110,31 @@ let input = fehm::build_input_from_text(&toml_text, &mesh_text)?;
 let solution = fehm::solve(&input)?;
 ```
 
+### Voxel grids
+
+The library also solves the steady flow on a regular voxel grid (no input
+file and no output file: library only). `fehm::voxel::VoxelGrid` gives the
+number of voxels, the voxel size, the origin and the permeability of each
+voxel (x fastest; `None` for a voxel with no flow).
+`calculate_voxel_control_volumes` makes one node at the center of each voxel
+with a permeability, and one connection for each face which two such voxels
+share: transmissibility = face area / center distance · harmonic mean of the
+two permeabilities. `solve_control_volumes` solves the flow on any control
+volumes, with a fixed pressure (or `None`) for each node:
+
+```rust
+let voxels = fehm::voxel::calculate_voxel_control_volumes(&grid)?;
+let solution = fehm::solve_control_volumes(&fehm::FlowProblem {
+    control_volumes: &voxels.control_volumes,
+    elevations: &voxels.elevations,
+    fixed_pressures: &fixed_pressures,
+    initial_pressure: 10.0,
+    temperature: 20.0,
+    has_gravity: true,
+    solver: &fehm::SolverOptions { tolerance: 1e-10, max_iterations: 20 },
+})?;
+```
+
 ## Comparison with FEHM
 
 `tests/fehm_reference.rs` compares the pressures with those of the Fortran
